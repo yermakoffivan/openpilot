@@ -24,6 +24,32 @@ class UIStatus(Enum):
   OVERRIDE = "override"
 
 
+class ChestnutState(Enum):
+  DISCONNECTED = "disconnected"
+  UNCOMPILED = "uncompiled"
+  READY = "ready"
+  LOADING = "loading"
+  ACTIVE = "active"
+  FALLBACK = "fallback"
+  FAILED = "failed"
+
+
+def get_chestnut_state(started: bool, present: bool, compiled: bool, loading: bool, active: bool | None,
+                       model_seen: bool, model_alive: bool, model_big: bool, failed: bool) -> tuple[ChestnutState, bool]:
+  if not started:
+    return (ChestnutState.READY if present and compiled else
+            ChestnutState.UNCOMPILED if present else ChestnutState.DISCONNECTED), False
+
+  failed |= not present or (active is False and not loading) or (model_seen and (not model_alive or not model_big))
+  if failed:
+    return (ChestnutState.FALLBACK if model_seen and model_alive and not model_big else ChestnutState.FAILED), True
+  if model_seen and model_alive and model_big:
+    return ChestnutState.ACTIVE, False
+  if loading or active is None or not model_seen:
+    return ChestnutState.LOADING, False
+  return ChestnutState.FAILED, True
+
+
 class UIState:
   _instance: 'UIState | None' = None
 
@@ -81,6 +107,8 @@ class UIState:
     self.usbgpu_compiled: bool = usbgpu_compiled()
     self.usbgpu_active: bool | None = self.params.get("UsbGpuActive")
     self.usbgpu_loading: bool = self.params.get_bool("UsbGpuLoading")
+    self.chestnut_state = ChestnutState.DISCONNECTED
+    self._chestnut_failed = False
     self.started: bool = False
     self.ignition: bool = False
     self.recording_audio: bool = False
@@ -126,6 +154,7 @@ class UIState:
     self.sm.update(0)
     self._update_state()
     self._update_status()
+    self._update_chestnut_state()
     device.update()
 
   def _params_refresh_worker(self):
@@ -192,6 +221,14 @@ class UIState:
 
       self._started_prev = self.started
 
+  def _update_chestnut_state(self) -> None:
+    self.usbgpu = self.sm["deviceState"].chestnutPresent or (self.usbgpu and self.started)
+    model_seen = self.sm.recv_frame["modelV2"] > self.started_frame
+    self.chestnut_state, self._chestnut_failed = get_chestnut_state(
+      self.started, self.sm["deviceState"].chestnutPresent, self.usbgpu_compiled, self.usbgpu_loading,
+      self.usbgpu_active, model_seen, self.sm.alive["modelV2"], self.sm["modelV2"].big, self._chestnut_failed,
+    )
+
   def update_params(self) -> None:
     # For slower operations
     # Update longitudinal control state
@@ -208,8 +245,6 @@ class UIState:
     self.always_on_dm = self.params.get_bool("AlwaysOnDM")
     self.experimental_mode = self.params.get_bool("ExperimentalMode")
     self.experimental_mode_confirmed = self.params.get_bool("ExperimentalModeConfirmed")
-    # keep usbgpu UI active until offroad transition when gpu disappears
-    self.usbgpu = self.sm["deviceState"].chestnutPresent or (self.usbgpu and self.started)
     if not self.usbgpu_compiled:
       self.usbgpu_compiled = usbgpu_compiled()
     self.usbgpu_active = self.params.get("UsbGpuActive")

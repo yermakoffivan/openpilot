@@ -3,7 +3,7 @@ import pyray as rl
 from dataclasses import dataclass
 from openpilot.common.constants import CV
 from openpilot.selfdrive.ui.mici.onroad.torque_bar import TorqueBar
-from openpilot.selfdrive.ui.ui_state import ui_state, UIStatus
+from openpilot.selfdrive.ui.ui_state import ui_state, UIStatus, ChestnutState
 from openpilot.system.ui.lib.application import gui_app, FontWeight
 from openpilot.system.ui.lib.multilang import tr
 from openpilot.system.ui.lib.text_measure import measure_text_cached
@@ -107,8 +107,6 @@ class HudRenderer(Widget):
     self.speed: float = 0.0
     self.v_ego_cluster_seen: bool = False
     self._engaged: bool = False
-    self._small_model_engaged: bool = False
-    self._egpu_fade_time: float = 0
 
     self._can_draw_top_icons = True
     self._show_wheel_critical = False
@@ -165,11 +163,6 @@ class HudRenderer(Widget):
       controls_state.deprecated.vCruise if v_cruise_cluster == 0.0 else v_cruise_cluster
     )
     engaged = sm['selfdriveState'].enabled
-    if (engaged and not self._engaged and not ui_state.usbgpu_loading and ui_state.usbgpu_active is not True and
-        ui_state.sm.recv_frame['modelV2'] > ui_state.started_frame):
-      self._small_model_engaged = True
-    if engaged != self._engaged:
-      self._egpu_fade_time = rl.get_time() if engaged else 0
     if (set_speed != self.set_speed and engaged) or (engaged and not self._engaged):
       self._set_speed_changed_time = rl.get_time()
     self._engaged = engaged
@@ -200,30 +193,26 @@ class HudRenderer(Widget):
     if ui_state.sm.recv_frame['selfdriveState'] < ui_state.started_frame:
       return
 
-    big_failed = (ui_state.usbgpu_active is False or not ui_state.sm['deviceState'].chestnutPresent or
-                  (ui_state.usbgpu_active is True and ui_state.sm.recv_frame['modelV2'] > ui_state.started_frame and
-                   not ui_state.sm.alive['modelV2']) or
-                  (ui_state.usbgpu_active is None and ui_state.sm.recv_frame['modelV2'] > ui_state.started_frame))
-    self._small_model_engaged &= big_failed
-    loading = ui_state.usbgpu_loading or (ui_state.usbgpu_active is None and not big_failed)
+    loading = ui_state.chestnut_state == ChestnutState.LOADING
     if loading:
       pulse = 0.5 - 0.5 * math.cos(rl.get_time() * 6.0)
       icon = self._txt_egpu
       opacity = 0.35 + 0.65 * pulse
-    elif self._small_model_engaged:
+    elif ui_state.chestnut_state == ChestnutState.FALLBACK:
       icon = self._txt_egpu_crossed
       opacity = 0.65
-    elif big_failed:
+    elif ui_state.chestnut_state == ChestnutState.FAILED:
       icon = self._txt_egpu_orange
       opacity = 1.0
-    else:
+    elif ui_state.chestnut_state == ChestnutState.ACTIVE:
       icon = self._txt_egpu_green
       opacity = 1.0
+    else:
+      return
 
     if icon is not self._egpu_icon:
-      self._egpu_fade_time = rl.get_time()
       self._egpu_icon = icon
-    alpha = self._egpu_alpha_filter.update(loading or 0 < rl.get_time() - self._egpu_fade_time < SET_SPEED_PERSISTENCE)
+    alpha = self._egpu_alpha_filter.update(True)
     if alpha < 1e-2:
       return
 
